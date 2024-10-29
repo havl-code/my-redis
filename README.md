@@ -17,7 +17,7 @@ This project is inspired by the "Build Your Own Redis with C/C++" guide. It aims
 
 ## Getting Started
 ### Prerequisites
-- C Complier: Required for building the code
+- C Compiler: Required for building the code
 - Linux Environment: The project is currently developed on Linux for compatibility with networking libraries.
 
 ### Cloning the Repository
