@@ -3,22 +3,22 @@
 This project is inspired by the "Build Your Own Redis with C/C++" guide. It aims to break down and implement essential features of an in-memory key-value store.
 
 ## Project Goals
-- Hands-on learning: Build an understanding of systems programming with C, focusing on socket communication, memory management, and data structures
+- Hands-on learning: Build an understanding of systems programming with C, focusing on socket communication, memory management, data structures, and efficient client-server protocols.
 - Feature staging: Develop in incremental stages to gradually introduce network protocols, command handling, and storage techniques
 
 ## Current Featues
-1. TCP Server-Client Communication:TCP Server-Client Communication:
-   - Implemented a basic TCP server and client setup to allow communication between client requests and server responses.
-   - The server listens on a specified port, accepts client messages, and returns responses.
+1. **TCP Server-Client Communication:**
+   - The server and client communicate using a structured message protocol, with each message prefixed by a 4-byte length header.
+   - The server listens on a specified port, accepts multiple requests per client connection, and returns structured responses.
 
-2. Error Handling and Debugging:
-   - Basic error handling to manage socket errors and unexpected disconnections.
-   - Helper functions for consistent logging and debugging. 
+2. **Error Handling and Debugging:**
+   - Expanded error handling to manage socket errors, unexpected disconnections, and message size validations.
+   - Helper functions provide consistent logging and error messages for ease of debugging.
 
 ## Getting Started
 ### Prerequisites
-- C Compiler: Required for building the code
-- Linux Environment: The project is currently developed on Linux for compatibility with networking libraries.
+- **C Compiler**: Required for building the code
+- **Linux Environment**: The project is currently developed on Linux for compatibility with networking libraries.
 
 ### Cloning the Repository
 ```bash
@@ -43,9 +43,8 @@ gcc -o client client.c
 The client will send a message to the server and receive a response.
 
 ## Project Structure
-- server.c: Contains the server code for setting up a TCP socket and handling client connections.
-- client.c: Implements the client code to connect to the server, send requests, and handle responses.
-- README.md: This documentation file.
+- **server.c**: Contains the server code with modular handling of client requests, structured message protocol, and multi-request capability per client connection.
+- **client.c**: Implements the client code with multiple requests to the server, modular query handling, and complete data transmission with helper functions.
 
 ## Future Features (In Progress)
 
