@@ -11,17 +11,16 @@
 #include <netinet/ip.h>
 
 // constant definition used to limit the size of data sent and received
-const size_t k_max_msg = 4096;
+#define MAX_MSG_SIZE 4096
 
 // function to handle errors
 static void msg(const char *msg) {
     fprintf(stderr, "%s\n", msg);
 }
 
-static void die(const char *msg) {
-    int err = errno;                        // get error code (errno) into err
-    fprintf(stderr, "[%d] %s\n", err, msg); // prints an error message (msg) and error code (err) to standard error (stderr)
-    abort();                                // terminate program
+static void die(const char *message) {
+    perror(message);
+    exit(EXIT_FAILURE);
 }
 
 // read_full function
@@ -53,21 +52,21 @@ static int32_t write_all(int fd, const char *buf, size_t n) {   // writes n byte
 }
 
 // query function
-static int32_t query(int fd, const char *text) {    // query sends text to server and receives a response
+static int32_t send_req(int fd, const char *text) { // query sends text to server and receives a response
     uint32_t len = (uint32_t)strlen(text);          // gets the length of text
-    if(len > k_max_msg) {                           // returns -1 if text exceeds allowed size
+    if(len > MAX_MSG_SIZE) {                           // returns -1 if text exceeds allowed size
         return -1;
     }
 
-    char wbuf[4 + k_max_msg];           // allocates wbuf with 4 bytes for text len and space for text
+    char wbuf[4 + MAX_MSG_SIZE];           // allocates wbuf with 4 bytes for text len and space for text
     memcpy(wbuf, &len, 4);              // copies len into first 4 bytes of wbuf
     memcpy(&wbuf[4], text, len);        // copies text into wbuf starting after length bytes
-    if (write_all(fd, wbuf, 4 + len)) { // sends length and text to server
-        return -1;
-    }
+    return write_all(fd, wbuf, 4 + len);
+}
 
+ static int32_t read_res(int fd) {
     // reading server response header
-    char rbuf[4 + k_max_msg + 1];           // buffer for server's response
+    char rbuf[4 + MAX_MSG_SIZE + 1];           // buffer for server's response
     errno = 0;                              // resets errno to catch new errors
 
     int32_t err = read_full(fd, rbuf, 4);   // reads 4 byte-length header from server
@@ -79,9 +78,10 @@ static int32_t query(int fd, const char *text) {    // query sends text to serve
         }
         return err;
     }
-
+    
+    uint32_t len = 0;
     memcpy(&len, rbuf, 4);  // reads message length from response header
-    if (len > k_max_msg) {  // returns error if message exceedds allowed length
+    if (len > MAX_MSG_SIZE) {  // returns error if message exceedds allowed length
         msg("too long");
         return -1;
     }
@@ -121,18 +121,16 @@ int main() {
         die("connect"); // if connects return non-zero value (rv), prints out error and exit
     }
 
-    // send messages to the server
-    int32_t err = query(fd, "hello1");
-    if (err) {
-        goto L_DONE;
-    }
-    err = query(fd, "hello2");
-    if (err) {
-        goto L_DONE;
-    }
-    err = query(fd, "hello3");
-    if (err) {
-        goto L_DONE;
+    // multiple pipelined requests
+    const char *query_list[3] = {"hello1", "hello2", "hello3"}; // define list of queries
+    for (size_t i = 0; i < 3; i++) {            // loop through query_list and send each request
+        if (send_req(fd, query_list[i]) < 0) {  // if error occurs, program exit
+            goto L_DONE;
+        }
+        // after sending all requests, clients waits for resppnses
+        if (read_res(fd) < 0) {                 // if any read fails, program exit
+            goto L_DONE;
+        }
     }
 
 L_DONE:         // uses goto L_DONE if error occurs, skipping further requests

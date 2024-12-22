@@ -5,11 +5,16 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
-#include <unistd.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <stdbool.h>
+#include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/ip.h>
+
+#define MAX_MSG_SIZE 4096
+#define MAX_FD 1024  // Maximum file descriptors for simplicity
 
 // helper function to write simple error message
 static void msg(const char *msg) {
@@ -17,84 +22,173 @@ static void msg(const char *msg) {
 }
 
 // error handling
-static void die(const char *msg){
-    int err = errno;
-    fprintf(stderr, "[%d] %s\n", err, msg);
-    abort();
+static void die(const char *message) {
+    perror(message);
+    exit(EXIT_FAILURE);
 }
 
-const size_t k_max_msg = 4096;
-
-// read exactly n bytes from fd into buf
-static int32_t read_full(int fd, char *buf, size_t n){
-    while (n > 0) {     // repeats read until ann n bytes are received or an error occurs
-        ssize_t rv = read(fd, buf, n);
-        if (rv <= 0) {
-            return -1;  // error
-        }
-        assert((size_t)rv <= n);
-        n-= (size_t)rv;
-        buf += rv;
+// set file descriptor to nonblocking mode
+static void fd_set_nb(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);  // get current flags for the file descriptor
+    if (flags == -1) {
+        die("fcntl F_GETFL");
     }
-    return 0;
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) { // add the O_NONBLOCK flag
+        die("fcntl F_SETFL O_NONBLOCK");
+    }
 }
 
-// write exactly n bytes from buf into fd
-static int32_t write_all(int fd, const char *buf, size_t n) {
-    while (n > 0) {
-        ssize_t rv = write(fd, buf, n);
-        if (rv <= 0) {
-            return -1;  // error
-        }
-        assert((size_t)rv <= n);
-        n -= (size_t)rv;
-        buf += rv;
+// define connection states
+enum {
+    STATE_REQ = 0,  // waiting for client request (read)
+    STATE_RES = 1,  // ready to send response to client (write)
+    STATE_END = 2,  // mark connection for closure (client disconnected or error)
+};
+
+// store connection data
+struct Conn {
+    int fd;                         // file descriptor
+    uint32_t state;                 // current state (REQ, RES, END)
+    size_t rbuf_size;               // size of current data in read buffer
+    uint8_t rbuf[4 + MAX_MSG_SIZE]; // read buffer (header + msg)
+    size_t wbuf_size;               // size of data in write buffer
+    size_t wbuf_sent;               // number of bytes already sent from write buffer
+    uint8_t wbuf[4 + MAX_MSG_SIZE]; // write buffer (header + message)
+};
+
+// store and retrieve connection data by file descriptor
+struct Conn *fd2conn[MAX_FD] = {NULL};
+
+// store a connection object in the global array
+static void conn_put(struct Conn *conn) {
+    if (conn->fd >= 0 && conn->fd < MAX_FD) {
+        fd2conn[conn->fd] = conn;   // add connection to the global array
     }
-    return 0;
 }
 
-// handle a single client request
-static int32_t one_request(int connfd) {
-    // 4-byte header for message length
-    char rbuf[4 + k_max_msg + 1];
-    errno = 0;
-
-    // read the 4-byte header
-    int32_t err = read_full(connfd, rbuf, 4);
-    if (err) {
-        if (errno == 0) {
-            msg("EOF");
-        } else {
-            msg("read() error");
-        }
-        return err;
+// accept new client connection
+static int32_t accept_new_conn(int fd) {
+    struct sockaddr_in client_addr = {};
+    socklen_t socklen = sizeof(client_addr);
+    int connfd = accept(fd, (struct sockaddr *)&client_addr, &socklen); // accept a new connection
+    if(connfd < 0) {
+        msg("accept() error");
+        return -1;
     }
+    fd_set_nb(connfd);  // set new connection to nonblocking mode
 
-    uint32_t len = 0;
-    memcpy(&len, rbuf, 4);  // assume little endian for length
-    if (len > k_max_msg) {
-        msg("too long");
+    struct Conn *conn = (struct Conn *)malloc(sizeof(struct Conn)); // allocate memory for connection
+    if(!conn) {
+        close(connfd);
         return -1;
     }
 
-    // read the message body
-    err = read_full(connfd, &rbuf[4], len);
-    if (err) {
-        msg("read() error");
-        return err;
+    conn->fd = connfd;
+    conn->state = STATE_REQ;    // initialise connection in the read state
+    conn->rbuf_size = 0;
+    conn->wbuf_size = 0;
+    conn->wbuf_sent = 0;
+    conn_put(conn); // store connection in the global array
+    return 0;
+}
+
+// try to process one request
+static bool try_one_request(struct Conn *conn) {
+    if (conn->rbuf_size < 4) {  // ensure enough data is available for a message header
+        return false;
+    }
+    uint32_t len = 0;
+    memcpy(&len, conn->rbuf, 4);    // extract message length
+    if(len > MAX_MSG_SIZE) {        // validate message length
+        msg("request too long");
+        conn->state = STATE_END;
+        return false;
+    }
+    if (4 + len > conn->rbuf_size) {    // check if the complete message has been received
+        return false;
     }
 
-    // print the client's message
-    rbuf[4 + len] = '\0';
-    printf("client says: %s\n", &rbuf[4]);
+    printf("client says: %.*s\n", len, &conn->rbuf[4]); // print the message from the client
 
-    // prepare a reply
-    const char reply[] = "world";
-    char wbuf[4 + sizeof(reply)];
-    len = (uint32_t)strlen(reply);
-    memcpy(wbuf, &len, 4);          // 4-byte header for reply length
-    memcpy(&wbuf[4], reply, len);   // reply body
-    return write_all(connfd, wbuf, 4 + len);
+    memcpy(conn->wbuf, &len, 4);    // copy length to write buffer
+    memcpy(&conn->wbuf[4], &conn->rbuf[4], len);    // copy message to write buffer
+    conn->wbuf_size = 4 + len;
+
+    size_t remain = conn->rbuf_size - 4 - len;  // remove processed data from the read buffer
+    if (remain > 0) {
+        memmove(conn->rbuf, &conn->rbuf[4 + len], remain);
+    }
+    conn->rbuf_size = remain;
+    conn->state = STATE_RES;    // switch to write state
+    return true;
+}
+
+// fill read buffer with data
+static bool try_fill_buffer(struct Conn *conn) {
+    // continuously read data from the client and fill the connection's read buffer
+    while (1) {
+        size_t cap = sizeof(conn->rbuf) - conn->rbuf_size;              // calculate the available space in the buffer
+        ssize_t rv = read(conn->fd, &conn->rbuf[conn->rbuf_size], cap); // number of bytes read
+        
+        // nonblocking check
+        if (rv < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {  // if no more data is available
+            return false;
+        }
+
+        // error handling
+        if (rv <= 0) {
+            msg("read error or EOF");
+            conn->state = STATE_END;
+            return false;
+        }
+
+        // buffer update
+        conn->rbuf_size += rv;              // increase rbuf_size by rv
+        while (try_one_request(conn)) {}    // process requests from the buffer until no more complete requests remain
+    }
+    return true;
+}
+
+// flush write buffer
+static bool try_flush_buffer(struct Conn *conn) {
+    // continuously write data from the connection's write buffer to the client
+    while (1) {
+        size_t remain = conn->wbuf_size - conn->wbuf_sent;  // calculate how much data remains to be written
+        ssize_t rv = write(conn->fd, &conn->wbuf[conn->wbuf_sent], remain);
+        
+        // nonblocking check
+        if (rv < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { // if the socket's write buffer is full
+            return false;
+        }
+
+        // error handling
+        if (rv <= 0) {
+            msg("Write error");
+            conn->state = STATE_END;
+            return false;
+        }
+
+        // buffer update
+        conn->wbuf_sent += rv;
+        if (conn->wbuf_sent == conn->wbuf_size) {
+            while (try_one_request(conn)) {}
+            conn->state = STATE_REQ;    // when fully sent, the state transitions back to STATE_REQ
+            
+            // buffer counters are reset, preparing for the next request
+            conn->wbuf_sent = 0;
+            conn->wbuf_size = 0;
+            return false;
+        }
+    }
+}
+
+// manages state transitions
+static void connection_io(struct Conn *conn) {
+    if (conn->state == STATE_REQ) {
+        try_fill_buffer(conn);  // fill the read buffer
+    } else if (conn->state == STATE_RES) {
+        try_flush_buffer(conn); // flush the write buffer
+    }
 }
 
 // initates server and manages incoming connections
@@ -131,24 +225,33 @@ int main() {
         die("listen()");
     }
 
+    fd_set_nb(fd);
+    struct pollfd poll_fds[MAX_FD];
+
     // acccept and handle client connections
-    while (true) {                                  // starts infinite loop
-        struct sockaddr_in client_addr = {};        // stores client's address info
-        socklen_t socklen = sizeof(client_addr);    // defines size of client's address
-        int connfd = accept(fd, (struct sockaddr *)&client_addr, &socklen); // accepts incoming connection
-        if (connfd < 0) {
-            continue;           //if accept failes, loop continues without handling error
+    while (1) {
+        poll_fds[0].fd = fd;
+        poll_fds[0].events = POLLIN;    // monitor server socket for incoming connections
+
+        int rv = poll(poll_fds, 1, 1000);   // poll for events
+
+        if (rv < 0) {
+            die("poll()");
+        }
+        if(poll_fds[0].revents & POLLIN) {  // accept new connections if server socket is ready
+            accept_new_conn(fd);
         }
 
-        // handle multiple requests from a single client
-        while (true) {
-            int32_t err = one_request(connfd);
-            if (err) {
-                break;
+        for (int i = 0; i < MAX_FD; i++) {
+            if(fd2conn[i]) {
+                connection_io(fd2conn[i]);
+                if (fd2conn[i]->state == STATE_END) {   // cleanup closed connections
+                    close(fd2conn[i]->fd);
+                    free(fd2conn[i]);
+                    fd2conn[i] = NULL;
+                }
             }
         }
-        close(connfd);
     }
-    
     return 0;
 }
