@@ -15,6 +15,12 @@ This project is inspired by the "Build Your Own Redis with C/C++" guide. It aims
    - Expanded error handling to manage socket errors, unexpected disconnections, and message size validations.
    - Helper functions provide consistent logging and error messages for ease of debugging.
 
+3. **Pipelined Request Handling:**
+   - Managing multiple client requests in a single connection efficiently.
+
+4. **Non-blocking I/O Operations:**
+   - Implementing non-blocking reads and writes to enhance performance.
+
 ## Getting Started
 ### Prerequisites
 - **C Compiler**: Required for building the code
@@ -45,8 +51,6 @@ The client will send a message to the server and receive a response.
 ## Project Structure
 - **server.c**: Contains the server code with modular handling of client requests, structured message protocol, and multi-request capability per client connection.
 - **client.c**: Implements the client code with multiple requests to the server, modular query handling, and complete data transmission with helper functions.
-
-## Future Features (In Progress)
 
 ## Resources
 This project is based on concepts and code from the ["Build Your Own Redis with C/C++"](https://build-your-own.org/redis) guide.
