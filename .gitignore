@@ -1,0 +1,16 @@
+# Compiled binaries
+server
+client
+*.o
+*.out
+*.exe
+
+# Debug symbols
+*.dSYM/
+*.pdb
+
+# Editor/OS cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store
