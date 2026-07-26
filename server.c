@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <stdbool.h>
+#include <strings.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -98,11 +99,88 @@ static int32_t accept_new_conn(int fd) {
     return 0;
 }
 
+// ---- simple chained hash table for the key-value store ----
+
+#define HTABLE_SIZE 4096
+
+typedef struct Entry {
+    char *key;
+    size_t klen;
+    char *val;
+    size_t vlen;
+    struct Entry *next;
+} Entry;
+
+static Entry *htable[HTABLE_SIZE] = {NULL};
+
+// FNV-1a hash over arbitrary bytes
+static uint64_t hash_bytes(const uint8_t *data, size_t len) {
+    uint64_t h = 14695981039346656037UL;
+    for (size_t i = 0; i < len; i++) {
+        h ^= data[i];
+        h *= 1099511628211UL;
+    }
+    return h;
+}
+
+static Entry *h_lookup(const uint8_t *key, size_t klen) {
+    uint64_t slot = hash_bytes(key, klen) % HTABLE_SIZE;
+    for (Entry *e = htable[slot]; e; e = e->next) {
+        if (e->klen == klen && memcmp(e->key, key, klen) == 0) {
+            return e;
+        }
+    }
+    return NULL;
+}
+
+static void h_set(const uint8_t *key, size_t klen, const uint8_t *val, size_t vlen) {
+    Entry *e = h_lookup(key, klen);
+    if (e) {   // key exists, just replace the value
+        free(e->val);
+        e->val = malloc(vlen);
+        memcpy(e->val, val, vlen);
+        e->vlen = vlen;
+        return;
+    }
+    e = malloc(sizeof(Entry));   // new key, insert at the head of its bucket
+    e->key = malloc(klen);
+    memcpy(e->key, key, klen);
+    e->klen = klen;
+    e->val = malloc(vlen);
+    memcpy(e->val, val, vlen);
+    e->vlen = vlen;
+
+    uint64_t slot = hash_bytes(key, klen) % HTABLE_SIZE;
+    e->next = htable[slot];
+    htable[slot] = e;
+}
+
+static bool h_del(const uint8_t *key, size_t klen) {
+    uint64_t slot = hash_bytes(key, klen) % HTABLE_SIZE;
+    Entry **pp = &htable[slot];
+    while (*pp) {
+        Entry *e = *pp;
+        if (e->klen == klen && memcmp(e->key, key, klen) == 0) {
+            *pp = e->next;
+            free(e->key);
+            free(e->val);
+            free(e);
+            return true;
+        }
+        pp = &e->next;
+    }
+    return false;
+}
+
+// ---- request parsing and command dispatch ----
+
 // a single parsed argument: a pointer into the request buffer + its length
 typedef struct {
     uint32_t len;
     const uint8_t *data;
 } Arg;
+
+
 
 // parse a request body of the form [nstr][len1][str1][len2][str2]...
 // returns 0 on success, -1 if the body is malformed
@@ -138,19 +216,50 @@ static int32_t parse_req(const uint8_t *data, size_t len, uint32_t *out_nstr, Ar
     return 0;
 }
 
-// placeholder command handler: echoes back the parsed argument list so we can
-// verify the new protocol end-to-end. Real GET/SET/DEL dispatch comes next.
+// case-insensitive check for whether an Arg matches a literal command name
+static bool arg_is(const Arg *a, const char *s) {
+    size_t slen = strlen(s);
+    return a->len == slen && strncasecmp((const char *)a->data, s, slen) == 0;
+}
+
+// real command dispatch: GET key / SET key value / DEL key
 static uint32_t do_request(const Arg *args, uint32_t nstr, uint8_t *out_buf) {
-    char tmp[MAX_MSG_SIZE];
-    int pos = snprintf(tmp, sizeof(tmp), "parsed %u arg(s):", nstr);
-    for (uint32_t i = 0; i < nstr && pos > 0 && (size_t)pos < sizeof(tmp); i++) {
-        pos += snprintf(tmp + pos, sizeof(tmp) - (size_t)pos, " '%.*s'", args[i].len, args[i].data);
+    const char *resp = NULL;
+
+    if (nstr == 0) {
+        resp = "ERR empty command";
+    } else if (arg_is(&args[0], "get")) {
+        if (nstr != 2) {
+            resp = "ERR wrong number of arguments for 'get'";
+        } else {
+            Entry *e = h_lookup(args[1].data, args[1].len);
+            if (!e) {
+                resp = "(nil)";
+            } else {
+                size_t vlen = e->vlen > MAX_MSG_SIZE ? MAX_MSG_SIZE : e->vlen;
+                memcpy(out_buf, e->val, vlen);   // return the stored value directly
+                return (uint32_t)vlen;
+            }
+        }
+    } else if (arg_is(&args[0], "set")) {
+        if (nstr != 3) {
+            resp = "ERR wrong number of arguments for 'set'";
+        } else {
+            h_set(args[1].data, args[1].len, args[2].data, args[2].len);
+            resp = "OK";
+        }
+    } else if (arg_is(&args[0], "del")) {
+        if (nstr != 2) {
+            resp = "ERR wrong number of arguments for 'del'";
+        } else {
+            resp = h_del(args[1].data, args[1].len) ? "1" : "0";
+        }
+    } else {
+        resp = "ERR unknown command";
     }
-    size_t rlen = (pos > 0) ? (size_t)pos : 0;
-    if (rlen > MAX_MSG_SIZE) {
-        rlen = MAX_MSG_SIZE;
-    }
-    memcpy(out_buf, tmp, rlen);
+
+    size_t rlen = strlen(resp);
+    memcpy(out_buf, resp, rlen);
     return (uint32_t)rlen;
 }
 

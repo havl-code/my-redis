@@ -140,17 +140,19 @@ int main() {
     const char *cmd1[] = {"set", "key1", "hello"};
     const char *cmd2[] = {"get", "key1"};
     const char *cmd3[] = {"del", "key1"};
+    const char *cmd4[] = {"get", "key1"};   // should be (nil) now that key1 is deleted
 
     struct {
         const char **cmd;
         size_t n;
-    } requests[3] = {
+    } requests[4] = {
         {cmd1, sizeof(cmd1) / sizeof(cmd1[0])},
         {cmd2, sizeof(cmd2) / sizeof(cmd2[0])},
         {cmd3, sizeof(cmd3) / sizeof(cmd3[0])},
+        {cmd4, sizeof(cmd4) / sizeof(cmd4[0])},
     };
 
-    for (size_t i = 0; i < 3; i++) {                          // loop through requests and send each one
+    for (size_t i = 0; i < 4; i++) {                          // loop through requests and send each one
         if (send_req(fd, requests[i].cmd, requests[i].n) < 0) { // if error occurs, program exit
             goto L_DONE;
         }
