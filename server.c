@@ -216,6 +216,49 @@ static int32_t parse_req(const uint8_t *data, size_t len, uint32_t *out_nstr, Ar
     return 0;
 }
 
+// ---- typed response protocol ----
+// every response body now starts with a 1-byte type tag:
+//   NIL -> no payload
+//   ERR -> [4-byte error code][message bytes]
+//   STR -> raw string bytes
+//   INT -> [8-byte int64]
+enum {
+    RES_NIL = 0,
+    RES_ERR = 1,
+    RES_STR = 2,
+    RES_INT = 3,
+};
+
+enum {
+    ERR_UNKNOWN_CMD = 1,
+    ERR_BAD_ARGS = 2,
+};
+
+static uint32_t out_nil(uint8_t *out) {
+    out[0] = RES_NIL;
+    return 1;
+}
+
+static uint32_t out_err(uint8_t *out, uint32_t code, const char *emsg) {
+    out[0] = RES_ERR;
+    memcpy(&out[1], &code, 4);
+    size_t mlen = strlen(emsg);
+    memcpy(&out[5], emsg, mlen);
+    return 5 + (uint32_t)mlen;
+}
+
+static uint32_t out_str(uint8_t *out, const uint8_t *data, size_t len) {
+    out[0] = RES_STR;
+    memcpy(&out[1], data, len);
+    return 1 + (uint32_t)len;
+}
+
+static uint32_t out_int(uint8_t *out, int64_t val) {
+    out[0] = RES_INT;
+    memcpy(&out[1], &val, 8);
+    return 9;
+}
+
 // case-insensitive check for whether an Arg matches a literal command name
 static bool arg_is(const Arg *a, const char *s) {
     size_t slen = strlen(s);
@@ -224,43 +267,35 @@ static bool arg_is(const Arg *a, const char *s) {
 
 // real command dispatch: GET key / SET key value / DEL key
 static uint32_t do_request(const Arg *args, uint32_t nstr, uint8_t *out_buf) {
-    const char *resp = NULL;
-
     if (nstr == 0) {
-        resp = "ERR empty command";
-    } else if (arg_is(&args[0], "get")) {
-        if (nstr != 2) {
-            resp = "ERR wrong number of arguments for 'get'";
-        } else {
-            Entry *e = h_lookup(args[1].data, args[1].len);
-            if (!e) {
-                resp = "(nil)";
-            } else {
-                size_t vlen = e->vlen > MAX_MSG_SIZE ? MAX_MSG_SIZE : e->vlen;
-                memcpy(out_buf, e->val, vlen);   // return the stored value directly
-                return (uint32_t)vlen;
-            }
-        }
-    } else if (arg_is(&args[0], "set")) {
-        if (nstr != 3) {
-            resp = "ERR wrong number of arguments for 'set'";
-        } else {
-            h_set(args[1].data, args[1].len, args[2].data, args[2].len);
-            resp = "OK";
-        }
-    } else if (arg_is(&args[0], "del")) {
-        if (nstr != 2) {
-            resp = "ERR wrong number of arguments for 'del'";
-        } else {
-            resp = h_del(args[1].data, args[1].len) ? "1" : "0";
-        }
-    } else {
-        resp = "ERR unknown command";
+        return out_err(out_buf, ERR_BAD_ARGS, "empty command");
     }
-
-    size_t rlen = strlen(resp);
-    memcpy(out_buf, resp, rlen);
-    return (uint32_t)rlen;
+    if (arg_is(&args[0], "get")) {
+        if (nstr != 2) {
+            return out_err(out_buf, ERR_BAD_ARGS, "wrong number of arguments for 'get'");
+        }
+        Entry *e = h_lookup(args[1].data, args[1].len);
+        if (!e) {
+            return out_nil(out_buf);
+        }
+        size_t vlen = e->vlen > MAX_MSG_SIZE - 1 ? MAX_MSG_SIZE - 1 : e->vlen;
+        return out_str(out_buf, (const uint8_t *)e->val, vlen);
+    }
+    if (arg_is(&args[0], "set")) {
+        if (nstr != 3) {
+            return out_err(out_buf, ERR_BAD_ARGS, "wrong number of arguments for 'set'");
+        }
+        h_set(args[1].data, args[1].len, args[2].data, args[2].len);
+        return out_str(out_buf, (const uint8_t *)"OK", 2);
+    }
+    if (arg_is(&args[0], "del")) {
+        if (nstr != 2) {
+            return out_err(out_buf, ERR_BAD_ARGS, "wrong number of arguments for 'del'");
+        }
+        bool deleted = h_del(args[1].data, args[1].len);
+        return out_int(out_buf, deleted ? 1 : 0);
+    }
+    return out_err(out_buf, ERR_UNKNOWN_CMD, "unknown command");
 }
 
 // try to process one request

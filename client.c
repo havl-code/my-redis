@@ -13,6 +13,14 @@
 // constant definition used to limit the size of data sent and received
 #define MAX_MSG_SIZE 4096
 
+// response type tags, must match server.c's protocol
+enum {
+    RES_NIL = 0,
+    RES_ERR = 1,
+    RES_STR = 2,
+    RES_INT = 3,
+};
+
 // function to handle errors
 static void msg(const char *msg) {
     fprintf(stderr, "%s\n", msg);
@@ -101,15 +109,53 @@ static int32_t send_req(int fd, const char **cmd, size_t n) {
         return -1;
     }
 
-    // reading and printing message body
+    // reading the response body
     err = read_full(fd, &rbuf[4], len);     // reads message into rbuf after header
     if (err) {                              // error
         msg("read() error");
         return err;
     }
 
-    rbuf[4 + len] = '\0';                   // adds null terminator after message for safe printing
-    printf("server says: %s\n", &rbuf[4]);  // displays server's message
+    if (len < 1) {
+        msg("empty response");
+        return -1;
+    }
+
+    uint8_t type = (uint8_t)rbuf[4];        // first byte of the body is the type tag
+    const char *payload = &rbuf[5];         // everything after the type tag
+    size_t plen = len - 1;
+
+    switch (type) {
+    case RES_NIL:
+        printf("server says: (nil)\n");
+        break;
+    case RES_ERR: {
+        if (plen < 4) {
+            msg("malformed error response");
+            return -1;
+        }
+        uint32_t code = 0;
+        memcpy(&code, payload, 4);
+        printf("server says: (error %u) %.*s\n", code, (int)(plen - 4), payload + 4);
+        break;
+    }
+    case RES_STR:
+        printf("server says: %.*s\n", (int)plen, payload);
+        break;
+    case RES_INT: {
+        if (plen < 8) {
+            msg("malformed integer response");
+            return -1;
+        }
+        int64_t val = 0;
+        memcpy(&val, payload, 8);
+        printf("server says: (integer) %lld\n", (long long)val);
+        break;
+    }
+    default:
+        msg("unknown response type");
+        return -1;
+    }
     return 0;
 }
 
@@ -141,18 +187,20 @@ int main() {
     const char *cmd2[] = {"get", "key1"};
     const char *cmd3[] = {"del", "key1"};
     const char *cmd4[] = {"get", "key1"};   // should be (nil) now that key1 is deleted
+    const char *cmd5[] = {"bogus", "key1"}; // should trigger an error response
 
     struct {
         const char **cmd;
         size_t n;
-    } requests[4] = {
+    } requests[5] = {
         {cmd1, sizeof(cmd1) / sizeof(cmd1[0])},
         {cmd2, sizeof(cmd2) / sizeof(cmd2[0])},
         {cmd3, sizeof(cmd3) / sizeof(cmd3[0])},
         {cmd4, sizeof(cmd4) / sizeof(cmd4[0])},
+        {cmd5, sizeof(cmd5) / sizeof(cmd5[0])},
     };
 
-    for (size_t i = 0; i < 4; i++) {                          // loop through requests and send each one
+    for (size_t i = 0; i < 5; i++) {                          // loop through requests and send each one
         if (send_req(fd, requests[i].cmd, requests[i].n) < 0) { // if error occurs, program exit
             goto L_DONE;
         }
