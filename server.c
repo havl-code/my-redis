@@ -15,6 +15,7 @@
 
 #define MAX_MSG_SIZE 4096
 #define MAX_FD 1024  // Maximum file descriptors for simplicity
+#define MAX_ARGS 200 // Maximum number of strings allowed in one request
 
 // helper function to write simple error message
 static void msg(const char *msg) {
@@ -97,6 +98,62 @@ static int32_t accept_new_conn(int fd) {
     return 0;
 }
 
+// a single parsed argument: a pointer into the request buffer + its length
+typedef struct {
+    uint32_t len;
+    const uint8_t *data;
+} Arg;
+
+// parse a request body of the form [nstr][len1][str1][len2][str2]...
+// returns 0 on success, -1 if the body is malformed
+static int32_t parse_req(const uint8_t *data, size_t len, uint32_t *out_nstr, Arg *out_args, uint32_t max_args) {
+    if (len < 4) {
+        return -1;
+    }
+    uint32_t nstr = 0;
+    memcpy(&nstr, data, 4);
+    if (nstr > max_args) {
+        return -1;
+    }
+
+    size_t pos = 4;
+    for (uint32_t i = 0; i < nstr; i++) {
+        if (pos + 4 > len) {
+            return -1;
+        }
+        uint32_t slen = 0;
+        memcpy(&slen, &data[pos], 4);
+        pos += 4;
+        if (pos + slen > len) {   // string would run past the end of the body
+            return -1;
+        }
+        out_args[i].len = slen;
+        out_args[i].data = &data[pos];
+        pos += slen;
+    }
+    if (pos != len) {   // trailing bytes that don't belong to any string
+        return -1;
+    }
+    *out_nstr = nstr;
+    return 0;
+}
+
+// placeholder command handler: echoes back the parsed argument list so we can
+// verify the new protocol end-to-end. Real GET/SET/DEL dispatch comes next.
+static uint32_t do_request(const Arg *args, uint32_t nstr, uint8_t *out_buf) {
+    char tmp[MAX_MSG_SIZE];
+    int pos = snprintf(tmp, sizeof(tmp), "parsed %u arg(s):", nstr);
+    for (uint32_t i = 0; i < nstr && pos > 0 && (size_t)pos < sizeof(tmp); i++) {
+        pos += snprintf(tmp + pos, sizeof(tmp) - (size_t)pos, " '%.*s'", args[i].len, args[i].data);
+    }
+    size_t rlen = (pos > 0) ? (size_t)pos : 0;
+    if (rlen > MAX_MSG_SIZE) {
+        rlen = MAX_MSG_SIZE;
+    }
+    memcpy(out_buf, tmp, rlen);
+    return (uint32_t)rlen;
+}
+
 // try to process one request
 static bool try_one_request(struct Conn *conn) {
     if (conn->rbuf_size < 4) {  // ensure enough data is available for a message header
@@ -113,11 +170,24 @@ static bool try_one_request(struct Conn *conn) {
         return false;
     }
 
-    printf("client says: %.*s\n", len, &conn->rbuf[4]); // print the message from the client
+    // parse the body into a list of strings
+    Arg args[MAX_ARGS];
+    uint32_t nstr = 0;
+    if (parse_req(&conn->rbuf[4], len, &nstr, args, MAX_ARGS) < 0) {
+        msg("bad request");
+        conn->state = STATE_END;
+        return false;
+    }
 
-    memcpy(conn->wbuf, &len, 4);    // copy length to write buffer
-    memcpy(&conn->wbuf[4], &conn->rbuf[4], len);    // copy message to write buffer
-    conn->wbuf_size = 4 + len;
+    printf("client says:");
+    for (uint32_t i = 0; i < nstr; i++) {
+        printf(" '%.*s'", args[i].len, args[i].data);
+    }
+    printf("\n");
+
+    uint32_t rlen = do_request(args, nstr, &conn->wbuf[4]);   // build response after the 4-byte header
+    memcpy(conn->wbuf, &rlen, 4);
+    conn->wbuf_size = 4 + rlen;
 
     size_t remain = conn->rbuf_size - 4 - len;  // remove processed data from the read buffer
     if (remain > 0) {

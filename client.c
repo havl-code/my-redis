@@ -51,16 +51,31 @@ static int32_t write_all(int fd, const char *buf, size_t n) {   // writes n byte
     return 0;
 }
 
-// query function
-static int32_t send_req(int fd, const char *text) { // query sends text to server and receives a response
-    uint32_t len = (uint32_t)strlen(text);          // gets the length of text
-    if(len > MAX_MSG_SIZE) {                           // returns -1 if text exceeds allowed size
+// query function: sends a command as a list of strings, e.g. {"set", "key1", "hello"}
+// wire format (after the outer 4-byte total length): [nstr][len1][str1][len2][str2]...
+static int32_t send_req(int fd, const char **cmd, size_t n) {
+    uint32_t len = 4;   // 4 bytes to hold nstr itself
+    for (size_t i = 0; i < n; i++) {
+        len += 4 + (uint32_t)strlen(cmd[i]);   // 4-byte length prefix + the string bytes
+    }
+    if (len > MAX_MSG_SIZE) {   // returns -1 if the whole body exceeds allowed size
         return -1;
     }
 
-    char wbuf[4 + MAX_MSG_SIZE];           // allocates wbuf with 4 bytes for text len and space for text
-    memcpy(wbuf, &len, 4);              // copies len into first 4 bytes of wbuf
-    memcpy(&wbuf[4], text, len);        // copies text into wbuf starting after length bytes
+    char wbuf[4 + MAX_MSG_SIZE];    // 4 bytes for outer length + the body
+    memcpy(wbuf, &len, 4);          // outer length header
+
+    uint32_t nstr = (uint32_t)n;
+    memcpy(&wbuf[4], &nstr, 4);     // number of strings in this request
+
+    size_t pos = 8;                 // position just past outer-len (4) + nstr (4)
+    for (size_t i = 0; i < n; i++) {
+        uint32_t slen = (uint32_t)strlen(cmd[i]);
+        memcpy(&wbuf[pos], &slen, 4);
+        pos += 4;
+        memcpy(&wbuf[pos], cmd[i], slen);
+        pos += slen;
+    }
     return write_all(fd, wbuf, 4 + len);
 }
 
@@ -121,10 +136,22 @@ int main() {
         die("connect"); // if connects return non-zero value (rv), prints out error and exit
     }
 
-    // multiple pipelined requests
-    const char *query_list[3] = {"hello1", "hello2", "hello3"}; // define list of queries
-    for (size_t i = 0; i < 3; i++) {            // loop through query_list and send each request
-        if (send_req(fd, query_list[i]) < 0) {  // if error occurs, program exit
+    // multiple pipelined requests, each now a list of strings (command + args)
+    const char *cmd1[] = {"set", "key1", "hello"};
+    const char *cmd2[] = {"get", "key1"};
+    const char *cmd3[] = {"del", "key1"};
+
+    struct {
+        const char **cmd;
+        size_t n;
+    } requests[3] = {
+        {cmd1, sizeof(cmd1) / sizeof(cmd1[0])},
+        {cmd2, sizeof(cmd2) / sizeof(cmd2[0])},
+        {cmd3, sizeof(cmd3) / sizeof(cmd3[0])},
+    };
+
+    for (size_t i = 0; i < 3; i++) {                          // loop through requests and send each one
+        if (send_req(fd, requests[i].cmd, requests[i].n) < 0) { // if error occurs, program exit
             goto L_DONE;
         }
         // after sending all requests, clients waits for resppnses
