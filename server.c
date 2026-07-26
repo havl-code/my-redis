@@ -75,6 +75,11 @@ static int32_t accept_new_conn(int fd) {
         msg("accept() error");
         return -1;
     }
+    if (connfd >= MAX_FD) {   // reject if fd is beyond what fd2conn[] can hold
+        msg("too many connections, rejecting");
+        close(connfd);
+        return -1;
+    }
     fd_set_nb(connfd);  // set new connection to nonblocking mode
 
     struct Conn *conn = (struct Conn *)malloc(sizeof(struct Conn)); // allocate memory for connection
@@ -226,30 +231,57 @@ int main() {
     }
 
     fd_set_nb(fd);
-    struct pollfd poll_fds[MAX_FD];
+    struct pollfd poll_fds[MAX_FD + 1];   // +1 for the listening socket
 
     // acccept and handle client connections
     while (1) {
-        poll_fds[0].fd = fd;
-        poll_fds[0].events = POLLIN;    // monitor server socket for incoming connections
+        // build the poll_fds array fresh each iteration from active connections only
+        nfds_t nfds = 0;
 
-        int rv = poll(poll_fds, 1, 1000);   // poll for events
+        poll_fds[nfds].fd = fd;
+        poll_fds[nfds].events = POLLIN;    // monitor server socket for incoming connections
+        poll_fds[nfds].revents = 0;
+        nfds++;
+
+        for (int i = 0; i < MAX_FD; i++) {
+            struct Conn *conn = fd2conn[i];
+            if (!conn) {
+                continue;
+            }
+            struct pollfd pfd = {0};
+            pfd.fd = conn->fd;
+            pfd.events = (conn->state == STATE_REQ) ? POLLIN : POLLOUT;
+            pfd.events |= POLLERR;   // always watch for errors
+            poll_fds[nfds] = pfd;
+            nfds++;
+        }
+
+        int rv = poll(poll_fds, nfds, 1000);   // poll only fds that are actually connected
 
         if (rv < 0) {
             die("poll()");
         }
-        if(poll_fds[0].revents & POLLIN) {  // accept new connections if server socket is ready
+        if (poll_fds[0].revents & POLLIN) {  // accept new connections if server socket is ready
             accept_new_conn(fd);
         }
 
-        for (int i = 0; i < MAX_FD; i++) {
-            if(fd2conn[i]) {
-                connection_io(fd2conn[i]);
-                if (fd2conn[i]->state == STATE_END) {   // cleanup closed connections
-                    close(fd2conn[i]->fd);
-                    free(fd2conn[i]);
-                    fd2conn[i] = NULL;
-                }
+        // walk poll_fds (skip index 0, the listening socket) and only service fds that fired
+        for (size_t i = 1; i < nfds; i++) {
+            uint32_t ready = poll_fds[i].revents;
+            if (ready == 0) {
+                continue;   // nothing happened on this fd, skip the syscalls entirely
+            }
+
+            struct Conn *conn = fd2conn[poll_fds[i].fd];
+            if (!conn) {
+                continue;
+            }
+
+            connection_io(conn);
+            if (conn->state == STATE_END) {   // cleanup closed connections
+                close(conn->fd);
+                free(conn);
+                fd2conn[poll_fds[i].fd] = NULL;
             }
         }
     }
