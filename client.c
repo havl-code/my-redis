@@ -188,19 +188,25 @@ int main() {
     const char *cmd3[] = {"del", "key1"};
     const char *cmd4[] = {"get", "key1"};   // should be (nil) now that key1 is deleted
     const char *cmd5[] = {"bogus", "key1"}; // should trigger an error response
+    const char *cmd6[] = {"set", "key2", "world"};
+    const char *cmd7[] = {"expire", "key2", "1"};  // key2 expires in 1 second
+    const char *cmd8[] = {"ttl", "key2"};          // should report ~1 second remaining
 
     struct {
         const char **cmd;
         size_t n;
-    } requests[5] = {
+    } requests[8] = {
         {cmd1, sizeof(cmd1) / sizeof(cmd1[0])},
         {cmd2, sizeof(cmd2) / sizeof(cmd2[0])},
         {cmd3, sizeof(cmd3) / sizeof(cmd3[0])},
         {cmd4, sizeof(cmd4) / sizeof(cmd4[0])},
         {cmd5, sizeof(cmd5) / sizeof(cmd5[0])},
+        {cmd6, sizeof(cmd6) / sizeof(cmd6[0])},
+        {cmd7, sizeof(cmd7) / sizeof(cmd7[0])},
+        {cmd8, sizeof(cmd8) / sizeof(cmd8[0])},
     };
 
-    for (size_t i = 0; i < 5; i++) {                          // loop through requests and send each one
+    for (size_t i = 0; i < 8; i++) {                          // loop through requests and send each one
         if (send_req(fd, requests[i].cmd, requests[i].n) < 0) { // if error occurs, program exit
             goto L_DONE;
         }
@@ -208,6 +214,17 @@ int main() {
         if (read_res(fd) < 0) {                 // if any read fails, program exit
             goto L_DONE;
         }
+    }
+
+    // wait for key2's TTL to pass, then confirm it's gone (lazy expiration on access)
+    printf("(sleeping 2s to let key2 expire...)\n");
+    sleep(2);
+    const char *cmd9[] = {"get", "key2"};   // should now be (nil)
+    if (send_req(fd, cmd9, sizeof(cmd9) / sizeof(cmd9[0])) < 0) {
+        goto L_DONE;
+    }
+    if (read_res(fd) < 0) {
+        goto L_DONE;
     }
 
 L_DONE:         // uses goto L_DONE if error occurs, skipping further requests

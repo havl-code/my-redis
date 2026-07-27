@@ -9,6 +9,7 @@
 #include <poll.h>
 #include <stdbool.h>
 #include <strings.h>
+#include <time.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -108,6 +109,7 @@ typedef struct Entry {
     size_t klen;
     char *val;
     size_t vlen;
+    time_t expire_at;   // absolute unix time this key expires at; 0 = no expiry
     struct Entry *next;
 } Entry;
 
@@ -125,21 +127,33 @@ static uint64_t hash_bytes(const uint8_t *data, size_t len) {
 
 static Entry *h_lookup(const uint8_t *key, size_t klen) {
     uint64_t slot = hash_bytes(key, klen) % HTABLE_SIZE;
-    for (Entry *e = htable[slot]; e; e = e->next) {
+    Entry **pp = &htable[slot];
+    while (*pp) {
+        Entry *e = *pp;
         if (e->klen == klen && memcmp(e->key, key, klen) == 0) {
+            if (e->expire_at != 0 && e->expire_at <= time(NULL)) {
+                // key has expired: remove it lazily and report as missing
+                *pp = e->next;
+                free(e->key);
+                free(e->val);
+                free(e);
+                return NULL;
+            }
             return e;
         }
+        pp = &e->next;
     }
     return NULL;
 }
 
 static void h_set(const uint8_t *key, size_t klen, const uint8_t *val, size_t vlen) {
     Entry *e = h_lookup(key, klen);
-    if (e) {   // key exists, just replace the value
+    if (e) {   // key exists, just replace the value and clear any TTL
         free(e->val);
         e->val = malloc(vlen);
         memcpy(e->val, val, vlen);
         e->vlen = vlen;
+        e->expire_at = 0;
         return;
     }
     e = malloc(sizeof(Entry));   // new key, insert at the head of its bucket
@@ -149,6 +163,7 @@ static void h_set(const uint8_t *key, size_t klen, const uint8_t *val, size_t vl
     e->val = malloc(vlen);
     memcpy(e->val, val, vlen);
     e->vlen = vlen;
+    e->expire_at = 0;
 
     uint64_t slot = hash_bytes(key, klen) % HTABLE_SIZE;
     e->next = htable[slot];
@@ -265,6 +280,25 @@ static bool arg_is(const Arg *a, const char *s) {
     return a->len == slen && strncasecmp((const char *)a->data, s, slen) == 0;
 }
 
+// parse an Arg (not null-terminated) as a base-10 signed integer
+static bool arg_to_i64(const Arg *a, int64_t *out) {
+    if (a->len == 0 || a->len > 20) {
+        return false;
+    }
+    char buf[21];
+    memcpy(buf, a->data, a->len);
+    buf[a->len] = '\0';
+
+    char *end = NULL;
+    errno = 0;
+    long long v = strtoll(buf, &end, 10);
+    if (errno != 0 || end != buf + a->len) {
+        return false;
+    }
+    *out = (int64_t)v;
+    return true;
+}
+
 // real command dispatch: GET key / SET key value / DEL key
 static uint32_t do_request(const Arg *args, uint32_t nstr, uint8_t *out_buf) {
     if (nstr == 0) {
@@ -294,6 +328,38 @@ static uint32_t do_request(const Arg *args, uint32_t nstr, uint8_t *out_buf) {
         }
         bool deleted = h_del(args[1].data, args[1].len);
         return out_int(out_buf, deleted ? 1 : 0);
+    }
+    if (arg_is(&args[0], "expire")) {
+        if (nstr != 3) {
+            return out_err(out_buf, ERR_BAD_ARGS, "wrong number of arguments for 'expire'");
+        }
+        int64_t secs = 0;
+        if (!arg_to_i64(&args[2], &secs)) {
+            return out_err(out_buf, ERR_BAD_ARGS, "expire time is not an integer");
+        }
+        Entry *e = h_lookup(args[1].data, args[1].len);
+        if (!e) {
+            return out_int(out_buf, 0);   // key doesn't exist, nothing to expire
+        }
+        e->expire_at = time(NULL) + (time_t)secs;
+        return out_int(out_buf, 1);
+    }
+    if (arg_is(&args[0], "ttl")) {
+        if (nstr != 2) {
+            return out_err(out_buf, ERR_BAD_ARGS, "wrong number of arguments for 'ttl'");
+        }
+        Entry *e = h_lookup(args[1].data, args[1].len);
+        if (!e) {
+            return out_int(out_buf, -2);   // key does not exist
+        }
+        if (e->expire_at == 0) {
+            return out_int(out_buf, -1);   // key exists but has no TTL
+        }
+        int64_t remaining = (int64_t)(e->expire_at - time(NULL));
+        if (remaining < 0) {
+            remaining = 0;
+        }
+        return out_int(out_buf, remaining);
     }
     return out_err(out_buf, ERR_UNKNOWN_CMD, "unknown command");
 }
