@@ -1,0 +1,24 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile and run unit tests
+        run: |
+          cd tests
+          gcc -Wall -Wextra -o test_server_logic test_server_logic.c
+          ./test_server_logic
+
+      - name: Confirm server.c and client.c still compile cleanly
+        run: |
+          gcc -Wall -Wextra -Werror -o server server.c
+          gcc -Wall -Wextra -Werror -o client client.c

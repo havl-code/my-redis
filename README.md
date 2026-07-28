@@ -1,5 +1,6 @@
 # my-redis
 
+[![Tests](https://github.com/havl-code/my-redis/actions/workflows/tests.yml/badge.svg)](https://github.com/havl-code/my-redis/actions/workflows/tests.yml)
 [![Language](https://img.shields.io/badge/language-C-blue)](https://en.wikipedia.org/wiki/C_(programming_language))
 [![Licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
 
@@ -89,11 +90,22 @@ Any unrecognised command, or a command called with the wrong number of arguments
 - **server.c**: the server, including the event loop, request parsing, the hash table, and command dispatch.
 - **client.c**: a demo client that pipelines a handful of requests to exercise every command and response type.
 
+## Testing
+
+Pure logic that doesn't need a live socket or root (request parsing, integer parsing, hash table operations, and command dispatch) has unit tests under `tests/`, run automatically on every push via GitHub Actions (see the Tests badge above).
+
+```bash
+cd tests
+gcc -Wall -Wextra -o test_server_logic test_server_logic.c
+./test_server_logic
+```
+
+The parts that genuinely need a live TCP connection (`accept_new_conn`, the `poll()` event loop, real client/server interaction) aren't covered by automated tests, since they need two live processes and an actual socket; they're better verified by running the server and client together, as shown in the example session above.
+
 ## Known limitations
 
 - **The hash table does not resize.** It is fixed at 4096 buckets, so performance degrades as more keys are added than that was designed for.
 - **Expiration is lazy only.** Expired keys are only cleaned up when accessed again, so a key that is never looked up again after expiring will sit in memory indefinitely.
-- **No unit tests or CI yet.** Everything so far has been verified by running the server and client together and checking the output manually.
 - **Hard limits on size.** Messages are capped at 4096 bytes and the server tracks at most 1024 file descriptors, both for simplicity rather than tuned for production use.
 - **No persistence, authentication, or clustering.** Everything lives in memory in a single process and is lost when the server exits.
 
@@ -105,6 +117,7 @@ Any unrecognised command, or a command called with the wrong number of arguments
 - Writing a chained hash table from scratch
 - Implementing lazy TTL expiration
 - Designing a typed response protocol so results are unambiguous to a client
+- Unit testing `static` C functions without a build system, by including the source file directly into a test binary
 
 ## Licence
 

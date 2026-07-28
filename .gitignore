@@ -4,6 +4,7 @@ client
 *.o
 *.out
 *.exe
+test_server_logic
 
 # Debug symbols
 *.dSYM/
